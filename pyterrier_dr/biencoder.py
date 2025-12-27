@@ -1,42 +1,59 @@
-from more_itertools import chunked
+from typing import List, Optional
+from abc import abstractmethod
 import numpy as np
-import torch
-from torch import nn
 import pyterrier as pt
 import pandas as pd
+import pyterrier_alpha as pta
+import pyterrier_dr
 from . import SimFn
 
 
 class BiEncoder(pt.Transformer):
-    def __init__(self, batch_size=32, text_field='text', verbose=False):
+    """Represents a single-vector dense bi-encoder.
+
+    A ``BiEncoder`` encodes the text of a query or document into a dense vector.
+
+    This class functions as a transformer factory:
+     - Query encoding using :meth:`query_encoder`
+     - Document encoding using :meth:`doc_encoder`
+     - Text scoring (re-reranking) using :meth:`text_scorer`
+
+    It can also be used as a transformer directly. It infers which transformer to use
+    based on columns present in the input frame.
+
+    Note that in most cases, you will want to use a ``BiEncoder`` as part of a pipeline
+    with a :class:`~pyterrier_dr.FlexIndex` to perform dense indexing and retrival.
+    """
+    def __init__(self, *, batch_size=32, text_field='text', verbose=False):
+        """
+        Args:
+            batch_size: The default batch size to use for query/document encoding
+            text_field: The field in the input dataframe that contains the document text
+            verbose: Whether to show progress bars
+        """
         super().__init__()
         self.batch_size = batch_size
         self.text_field = text_field
         self.verbose = verbose
 
-    def encode_queries(self, texts, batch_size=None) -> np.array:
-        raise NotImplementedError()
-
-    def encode_docs(self, texts, batch_size=None) -> np.array:
-        raise NotImplementedError()
-
     def transform(self, inp: pd.DataFrame) -> pd.DataFrame:
-        columns = set(inp.columns)
-        modes = [
-            (['qid', 'query', self.text_field], self.scorer),
-            (['qid', 'query_vec', self.text_field], self.scorer),
-            (['qid', 'query', 'doc_vec'], self.scorer),
-            (['qid', 'query_vec', 'doc_vec'], self.scorer),
-            (['query'], self.query_encoder),
-            ([self.text_field], self.doc_encoder),
-        ]
-        for fields, fn in modes:
-            if all(f in columns for f in fields):
-                return fn()(inp)
-        message = f'Unexpected input with columns: {inp.columns}. Supports:'
-        for fields, fn in modes:
-            message += f'\n - {fn.__doc__.strip()}: {fields}'
-        raise RuntimeError(message)
+        with pta.validate.any(inp) as v:
+            v.query_frame(extra_columns=['query'], mode='query_encoder')
+            v.document_frame(extra_columns=[self.text_field], mode='doc_encoder')
+            v.result_frame(extra_columns=["query", self.text_field], mode='scorer')
+            v.columns(includes=['query', self.text_field], mode='scorer')
+            v.columns(includes=['query_vec', self.text_field], mode='scorer')
+            v.columns(includes=['query', 'doc_vec'], mode='scorer')
+            v.columns(includes=['query_vec', 'doc_vec'], mode='scorer')
+            v.columns(includes=['query'], mode='query_encoder')
+            v.columns(includes=[self.text_field], mode='doc_encoder')
+
+        if v.mode == 'scorer':
+            return self.scorer()(inp)
+        elif v.mode == 'query_encoder':
+            return self.query_encoder()(inp)
+        elif v.mode == 'doc_encoder':
+            return self.doc_encoder()(inp)
 
     def query_encoder(self, verbose=None, batch_size=None) -> pt.Transformer:
         """
@@ -50,11 +67,14 @@ class BiEncoder(pt.Transformer):
         """
         return BiDocEncoder(self, verbose=verbose, batch_size=batch_size)
 
-    def scorer(self, verbose=None, batch_size=None, sim_fn=None) -> pt.Transformer:
+    def text_scorer(self, verbose=None, batch_size=None, sim_fn=None) -> pt.Transformer:
         """
-        Scoring (re-ranking)
+        Text Scoring (re-ranking)
         """
         return BiScorer(self, verbose=verbose, batch_size=batch_size, sim_fn=sim_fn)
+
+    def scorer(self, verbose=None, batch_size=None, sim_fn=None) -> pt.Transformer:
+        return self.text_scorer(verbose=verbose, batch_size=batch_size, sim_fn=sim_fn)
 
     @property
     def sim_fn(self) -> SimFn:
@@ -64,6 +84,40 @@ class BiEncoder(pt.Transformer):
         if hasattr(self, 'config') and hasattr(self.config, 'sim_fn'):
             return SimFn(self.config.sim_fn)
         return SimFn.dot # default
+
+    @abstractmethod
+    def encode_queries(self, texts: List[str], batch_size: Optional[int] = None) -> np.array:
+        """Abstract method to encode a list of query texts into dense vectors.
+
+        This function is used by the transformer returned by :meth:`query_encoder`.
+
+        Args:
+            texts: A list of query texts
+            batch_size: The batch size to use for encoding
+
+        Returns:
+            np.array: A numpy array of shape (n_queries, n_dims)
+        """
+        raise NotImplementedError()
+
+    @abstractmethod
+    def encode_docs(self, texts: List[str], batch_size: Optional[int] = None) -> np.array:
+        """Abstract method to encode a list of document texts into dense vectors.
+
+        This function is used by the transformer returned by :meth:`doc_encoder`.
+
+        Args:
+            texts: A list of document texts
+            batch_size: The batch size to use for encoding
+
+        Returns:
+            np.array: A numpy array of shape (n_docs, n_dims)
+        """
+        raise NotImplementedError()
+
+    @staticmethod
+    def example() -> 'BiEncoder':
+        return pyterrier_dr.SBertBiEncoder('sentence-transformers/paraphrase-albert-small-v2')
 
 
 class BiQueryEncoder(pt.Transformer):
@@ -76,7 +130,9 @@ class BiQueryEncoder(pt.Transformer):
         return self.bi_encoder_model.encode_queries(texts, batch_size=batch_size or self.batch_size)
 
     def transform(self, inp: pd.DataFrame) -> pd.DataFrame:
-        assert all(c in inp.columns for c in ['query'])
+        with pt.validate.any(inp) as v:
+            v.query_frame(extra_columns=['query'])
+            v.columns(includes=['query'])
         it = inp['query'].values
         it, inv = np.unique(it, return_inverse=True)
         if self.verbose:
@@ -86,6 +142,9 @@ class BiQueryEncoder(pt.Transformer):
 
     def __repr__(self):
         return f'{repr(self.bi_encoder_model)}.query_encoder()'
+
+    def subtransformers(self):
+        return {} # don't treat self.bi_encoder_model as a subtransformer.
 
 
 class BiDocEncoder(pt.Transformer):
@@ -97,9 +156,14 @@ class BiDocEncoder(pt.Transformer):
 
     def encode(self, texts, batch_size=None) -> np.array:
         return self.bi_encoder_model.encode_docs(texts, batch_size=batch_size or self.batch_size)
+    
+    def fuse_rank_cutoff(self, k):
+        return pt.RankCutoff(k) >> self
 
     def transform(self, inp: pd.DataFrame) -> pd.DataFrame:
-        assert all(c in inp.columns for c in [self.text_field])
+        with pt.validate.any(inp) as v:
+            v.document_frame(extra_columns=[self.text_field])
+            v.columns(includes=[self.text_field])
         it = inp[self.text_field]
         if self.verbose:
             it = pt.tqdm(it, desc='Encoding Docs', unit='doc')
@@ -107,6 +171,9 @@ class BiDocEncoder(pt.Transformer):
 
     def __repr__(self):
         return f'{repr(self.bi_encoder_model)}.doc_encoder()'
+
+    def subtransformers(self):
+        return {} # don't treat self.bi_encoder_model as a subtransformer.
 
 
 class BiScorer(pt.Transformer):
@@ -118,8 +185,11 @@ class BiScorer(pt.Transformer):
         self.sim_fn = sim_fn if sim_fn is not None else bi_encoder_model.sim_fn
 
     def transform(self, inp: pd.DataFrame) -> pd.DataFrame:
-        assert 'query_vec' in inp.columns or 'query' in inp.columns
-        assert 'doc_vec' in inp.columns or self.text_field in inp.columns
+        with pta.validate.any(inp) as v:
+            v.columns(includes=['query_vec', 'doc_vec'])
+            v.columns(includes=['query', 'doc_vec'])
+            v.columns(includes=['query_vec', self.text_field])
+            v.columns(includes=['query', self.text_field])
         if 'query_vec' in inp.columns:
             query_vec = inp['query_vec']
         else:
@@ -137,3 +207,6 @@ class BiScorer(pt.Transformer):
 
     def __repr__(self):
         return f'{repr(self.bi_encoder_model)}.scorer()'
+
+    def subtransformers(self):
+        return {} # don't treat self.bi_encoder_model as a subtransformer.

@@ -1,4 +1,9 @@
 pytest
 pytest-subtests
-git+https://github.com/terrierteam/pyterrier_adaptive
+pytest-cov
+pytest-json-report
 voyager
+FlagEmbedding
+faiss-cpu
+ruff
+numpy<2.0.0 # needed for some operations with faiss

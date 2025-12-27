@@ -1,9 +1,8 @@
-import pandas as pd
 import os
 import pyterrier as pt
-import itertools
 import numpy as np
 import ir_datasets
+import pyterrier_alpha as pta
 import pyterrier_dr
 from . import FlexIndex
 
@@ -11,45 +10,84 @@ logger = ir_datasets.log.easy()
 
 
 class VoyagerRetriever(pt.Indexer):
-    def __init__(self, flex_index, voyager_index, query_ef=None, qbatch=64):
+    def __init__(self, flex_index, voyager_index, query_ef=None, num_results=1000, qbatch=64, drop_query_vec=False):
         self.flex_index = flex_index
         self.voyager_index = voyager_index
         self.query_ef = query_ef
+        self.num_results = num_results
         self.qbatch = qbatch
+        self.drop_query_vec = drop_query_vec
+
+    def fuse_rank_cutoff(self, k):
+        return None # disable fusion for ANN
+        if k < self.num_results:
+            return VoyagerRetriever(
+                self.flex_index, 
+                self.voyager_index,
+                query_ef=self.query_ef, 
+                num_results=k, 
+                qbatch=self.qbatch, 
+                drop_query_vec=self.drop_query_vec)
 
     def transform(self, inp):
+        pta.validate.query_frame(inp, extra_columns=['query_vec'])
         inp = inp.reset_index(drop=True)
-        assert all(f in inp.columns for f in ['qid', 'query_vec'])
         docnos, config = self.flex_index.payload(return_dvecs=False)
         query_vecs = np.stack(inp['query_vec'])
         query_vecs = query_vecs.copy()
-        idxs = []
-        res = {'docid': [], 'score': [], 'rank': []}
+        
+        result = pta.DataFrameBuilder(['docno', 'docid', 'score', 'rank'])
         num_q = query_vecs.shape[0]
         QBATCH = self.qbatch
         it = range(0, num_q, QBATCH)
         if self.flex_index.verbose:
-            it = logger.pbar(it, unit='qbatch')
+            it = pt.tqdm(it, unit='qbatch')
         for qidx in it:
             qvec_batch = query_vecs[qidx:qidx+QBATCH]
-            neighbor_ids, distances = self.voyager_index.query(qvec_batch, self.flex_index.num_results, self.query_ef)
-            for i, (s, d) in enumerate(zip(distances, neighbor_ids)):
+            neighbor_ids, distances = self.voyager_index.query(qvec_batch, self.num_results, self.query_ef)
+            for s, d in zip(distances, neighbor_ids):
                 mask = d != -1
                 d = d[mask]
                 s = s[mask]
-                res['docid'].append(d)
-                res['score'].append(-s)
-                res['rank'].append(np.arange(d.shape[0]))
-                idxs.extend(itertools.repeat(qidx+i, d.shape[0]))
-        res = {k: np.concatenate(v) for k, v in res.items()}
-        res['docno'] = docnos.fwd[res['docid']]
-        for col in inp.columns:
-            if col != 'query_vec':
-                res[col] = inp[col][idxs].values
-        return pd.DataFrame(res)
+                result.extend({
+                    'docno': docnos.fwd[d],
+                    'docid': d,
+                    'score': -s,
+                    'rank': np.arange(d.shape[0]),
+                })
+
+        if self.drop_query_vec:
+            inp = inp.drop(columns='query_vec')
+        return result.to_df(inp)
 
 
-def _voyager_retriever(self, neighbours=12, ef_construction=200, random_seed=1, storage_data_type='float32', query_ef=10):
+def _voyager_retriever(self,
+    neighbours: int = 12,
+    *,
+    num_results: int = 1000,
+    ef_construction: int = 200,
+    random_seed: int = 1,
+    storage_data_type: str = 'float32',
+    query_ef: int = 10,
+    drop_query_vec: bool = False
+) -> pt.Transformer:
+    """Returns a retriever that uses HNSW to search over a Voyager index.
+
+    Args:
+        neighbours (int, optional): Number of neighbours to search. Defaults to 12.
+        num_results (int, optional): Number of results to return per query. Defaults to 1000.
+        ef_construction (int, optional): Expansion factor for graph construction. Defaults to 200.
+        random_seed (int, optional): Random seed. Defaults to 1.
+        storage_data_type (str, optional): Storage data type. One of 'float32', 'float8', 'e4m3'. Defaults to 'float32'.
+        query_ef (int, optional): Expansion factor during querying. Defaults to 10.
+        drop_query_vec (bool, optional): Drop the query vector from the output. Defaults to False.
+
+    Returns:
+        :class:`~pyterrier.Transformer`: A retriever that uses HNSW to search over a Voyager index.
+
+    .. note::
+        This method requires the ``voyager`` package. Install it via ``pip install voyager``.
+    """
     pyterrier_dr.util.assert_voyager()
     import voyager
     meta, = self.payload(return_dvecs=False, return_docnos=False)
@@ -74,7 +112,7 @@ def _voyager_retriever(self, neighbours=12, ef_construction=200, random_seed=1, 
             print(index.ef)
             it = range(0, meta['doc_count'], BATCH_SIZE)
             if self.verbose:
-                it = logger.pbar(it, desc='building index', unit='dbatch')
+                it = pt.tqdm(it, desc='building index', unit='dbatch')
             for idx in it:
                 index.add_items(dvecs[idx:idx+BATCH_SIZE])
             with logger.duration('saving index'):
@@ -83,5 +121,5 @@ def _voyager_retriever(self, neighbours=12, ef_construction=200, random_seed=1, 
         else:
             with logger.duration('reading index'):
                 self._cache[key] = voyager.Index.load(str(self.index_path/index_name))
-    return VoyagerRetriever(self, self._cache[key], query_ef=query_ef)
+    return VoyagerRetriever(self, self._cache[key], query_ef=query_ef, drop_query_vec=drop_query_vec)
 FlexIndex.voyager_retriever = _voyager_retriever

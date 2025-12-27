@@ -1,4 +1,4 @@
-import threading
+# Deprecated module
 import torch
 import itertools
 import math
@@ -17,6 +17,11 @@ _logger = ir_datasets.log.easy()
 
 
 class DocnoFile:
+    """Represents a document ID lookup file.
+
+    .. deprecated:: 0.6.0
+        This class was replaced with ``npids.Lookup``
+    """
     def __init__(self, path):
         with open(path, 'rb') as f:
             metadata_size = int.from_bytes(f.read(2), byteorder='little')
@@ -111,7 +116,10 @@ class DocnoFile:
 
 
 class NilIndex(pt.Indexer):
-    # simulates an indexer; just used for testing
+    """This class is an indexer that does nothing. It is meant to be used for testing.
+
+    .. deprecated:: 0.6.0
+    """
     def transform(self, res):
         return res
 
@@ -121,6 +129,11 @@ class NilIndex(pt.Indexer):
 
 
 class NumpyIndex(pt.Indexer):
+    """This class implements a disk-based dense vector index using numpy memory maps.
+
+    .. deprecated:: 0.6.0
+        This class has been replaced with :class:`pyterrier_dr.FlexIndex`.
+    """
     def __init__(self, index_path=None, num_results=1000, score_fn='dot', overwrite=False, batch_size=4096, verbose=False, dtype='f4', drop_query_vec=True, inmem=False, cuda=False):
         self.index_path = Path(index_path)
         self.num_results = num_results
@@ -262,7 +275,7 @@ class NumpyIndex(pt.Indexer):
                 fout.write(doc_vecs.tobytes())
                 docnos.extend([d['docno'] for d in docs])
                 count += len(docs)
-        DocnoFile.build(docnos, path/f'docnos.npy')
+        DocnoFile.build(docnos, path/'docnos.npy')
         with open(path/'meta.json', 'wt') as f_meta:
             json.dump({'dtype': self.dtype, 'vec_size': vec_size, 'count': count}, f_meta)
 
@@ -281,6 +294,11 @@ class NumpyIndex(pt.Indexer):
 
 
 class MemIndex(pt.Indexer):
+    """This class implements an in-memory dense vector index using numpy arrays.
+
+    .. deprecated:: 0.6.0
+        This class has been replaced with :class:`pyterrier_dr.FlexIndex`.
+    """
     def __init__(self, num_results=1000, score_fn='dot', batch_size=4096, verbose=True, dtype='f4', drop_query_vec=True):
         # check we havent been passed a destination index, as per disk-based indexers
         assert isinstance(num_results, int)
@@ -421,6 +439,11 @@ class TorchRankedLists:
 
 
 class FaissFlat(pt.Indexer):
+    """This class implements a disk-based dense vector index using Faiss Flat indexes.
+
+    .. deprecated:: 0.6.0
+        This class has been replaced with :class:`pyterrier_dr.FlexIndex`.
+    """
     def __init__(self, index_path=None, num_results=1000, shard_size=500_000, score_fn='cos', overwrite=False, batch_size=4096, verbose=False, drop_query_vec=True, inmem=False, cuda=False):
         self.index_path = Path(index_path)
         self.num_results = num_results
@@ -469,8 +492,7 @@ class FaissFlat(pt.Indexer):
             query_vecs = query_vecs / np.linalg.norm(query_vecs, axis=1, keepdims=True)
         query_vecs = query_vecs.copy()
         res = []
-        query_heaps = [[] for _ in range(query_vecs.shape[0])]
-        docnos = DocnoFile(self.index_path/f'docnos.npy')
+        docnos = DocnoFile(self.index_path/'docnos.npy')
         num_q = query_vecs.shape[0]
         ranked_lists = RankedLists(self.num_results, num_q)
         dids_offset = 0
@@ -527,10 +549,15 @@ class FaissFlat(pt.Indexer):
                 index.add(doc_vecs)
                 docnos.extend(d['docno'] for d in batch)
             faiss.write_index(index, str(path/f'{shardid}.faiss'))
-        DocnoFile.build(docnos, path/f'docnos.npy')
+        DocnoFile.build(docnos, path/'docnos.npy')
 
 
 class FaissHnsw(pt.Indexer):
+    """This class implements a disk-based dense vector index using Faiss HNSW for approximate nearest neighbor retrieval.
+
+    .. deprecated:: 0.6.0
+        This class has been replaced with :class:`pyterrier_dr.FlexIndex`.
+    """
     def __init__(self, index_path, num_links=32, num_results=1000, shard_size=500_000, score_fn='cos', overwrite=False, batch_size=4096, verbose=False, drop_query_vec=True, qbatch=16):
         self.index_path = Path(index_path)
         self.num_links = num_links
@@ -569,8 +596,7 @@ class FaissHnsw(pt.Indexer):
             query_vecs = query_vecs / np.linalg.norm(query_vecs, axis=1, keepdims=True)
         query_vecs = query_vecs.copy()
         res = []
-        query_heaps = [[] for _ in range(query_vecs.shape[0])]
-        docnos = DocnoFile(self.index_path/f'docnos.npy')
+        docnos = DocnoFile(self.index_path/'docnos.npy')
         num_q = query_vecs.shape[0]
         ranked_lists = RankedLists(self.num_results, num_q)
         dids_offset = 0
@@ -630,7 +656,7 @@ class FaissHnsw(pt.Indexer):
                 index.add(doc_vecs)
                 docnos.extend(d['docno'] for d in batch)
             faiss.write_index(index, str(path/f'{shardid}.faiss'))
-        DocnoFile.build(docnos, path/f'docnos.npy')
+        DocnoFile.build(docnos, path/'docnos.npy')
 
 
 
@@ -645,6 +671,11 @@ class FaissHnsw(pt.Indexer):
 
 
 class TorchIndex(NumpyIndex):
+    """This class implements a disk-based dense vector index using PyTorch for GPU-accelerated retrieval.
+
+    .. deprecated:: 0.6.0
+        This class has been replaced with :class:`pyterrier_dr.FlexIndex`.
+    """
     def __init__(self,
                  index_path=None,
                  num_results=1000,

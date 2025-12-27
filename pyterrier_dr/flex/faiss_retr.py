@@ -1,36 +1,43 @@
+from typing import Optional
 import json
-import pandas as pd
 import math
 import struct
 import os
 import pyterrier as pt
-import itertools
 import numpy as np
 import tempfile
 import ir_datasets
 import pyterrier_dr
+import pyterrier_alpha as pta
 from . import FlexIndex
 
 logger = ir_datasets.log.easy()
 
 
 class FaissRetriever(pt.Indexer):
-    def __init__(self, flex_index, faiss_index, n_probe=None, ef_search=None, search_bounded_queue=None, qbatch=64):
+    def __init__(self, flex_index, faiss_index, n_probe=None, ef_search=None, search_bounded_queue=None, qbatch=64, drop_query_vec=False, num_results=1000):
         self.flex_index = flex_index
         self.faiss_index = faiss_index
         self.n_probe = n_probe
         self.ef_search = ef_search
         self.search_bounded_queue = search_bounded_queue
         self.qbatch = qbatch
+        self.drop_query_vec = drop_query_vec
+        self.num_results = num_results
+
+    def fuse_rank_cutoff(self, k):
+        return None # disable fusion for ANN
+        if k < self.num_results:
+            return FaissRetriever(self.flex_index, self.faiss_index,
+                                n_probe=self.n_probe, ef_search=self.ef_search, search_bounded_queue=self.search_bounded_queue,
+                                num_results=k, qbatch=self.qbatch, drop_query_vec=self.drop_query_vec)
 
     def transform(self, inp):
+        pta.validate.query_frame(inp, extra_columns=['query_vec'])
         inp = inp.reset_index(drop=True)
-        assert all(f in inp.columns for f in ['qid', 'query_vec'])
         docnos, config = self.flex_index.payload(return_dvecs=False)
         query_vecs = np.stack(inp['query_vec'])
         query_vecs = query_vecs.copy()
-        idxs = []
-        res = {'docid': [], 'score': [], 'rank': []}
         num_q = query_vecs.shape[0]
         QBATCH = self.qbatch
         if self.n_probe is not None:
@@ -41,26 +48,43 @@ class FaissRetriever(pt.Indexer):
             self.faiss_index.hnsw.search_bounded_queue = self.search_bounded_queue
         it = range(0, num_q, QBATCH)
         if self.flex_index.verbose:
-            it = logger.pbar(it, unit='qbatch')
+            it = pt.tqdm(it, unit='qbatch')
+
+        result = pta.DataFrameBuilder(['docno', 'docid', 'score', 'rank'])
         for qidx in it:
-            scores, dids = self.faiss_index.search(query_vecs[qidx:qidx+QBATCH], self.flex_index.num_results)
-            for i, (s, d) in enumerate(zip(scores, dids)):
+            scores, dids = self.faiss_index.search(query_vecs[qidx:qidx+QBATCH], self.num_results)
+            for s, d in zip(scores, dids):
                 mask = d != -1
                 d = d[mask]
                 s = s[mask]
-                res['docid'].append(d)
-                res['score'].append(s)
-                res['rank'].append(np.arange(d.shape[0]))
-                idxs.extend(itertools.repeat(qidx+i, d.shape[0]))
-        res = {k: np.concatenate(v) for k, v in res.items()}
-        res['docno'] = docnos.fwd[res['docid']]
-        for col in inp.columns:
-            if col != 'query_vec':
-                res[col] = inp[col][idxs].values
-        return pd.DataFrame(res)
+                result.extend({
+                    'docno': docnos.fwd[d],
+                    'docid': d,
+                    'score': s,
+                    'rank': np.arange(d.shape[0]),
+                })
+
+        if self.drop_query_vec:
+            inp = inp.drop(columns='query_vec')
+        return result.to_df(inp)
 
 
-def _faiss_flat_retriever(self, gpu=False, qbatch=64):
+def _faiss_flat_retriever(self, *, gpu=False, qbatch=64, drop_query_vec=False):
+    """Returns a retriever that uses FAISS to perform brute-force search over the indexed vectors.
+
+    Args:
+        gpu: Whether to load the index onto GPU for scoring
+        qbatch: The batch size during search
+        drop_query_vec: Whether to drop the query vector from the output
+
+    Returns:
+        :class:`~pyterrier.Transformer`: A retriever that uses FAISS to perform brute-force search over the indexed vectors
+
+    .. note::
+        This transformer requires the ``faiss`` package to be installed.
+
+    .. cite.dblp:: journals/corr/abs-2401-08281
+    """
     pyterrier_dr.util.assert_faiss()
     import faiss
     if 'faiss_flat' not in self._cache:
@@ -80,12 +104,46 @@ def _faiss_flat_retriever(self, gpu=False, qbatch=64):
             co = faiss.GpuMultipleClonerOptions()
             co.shard = True
             self._cache['faiss_flat_gpu'] = faiss.index_cpu_to_all_gpus(self._faiss_flat, co=co)
-        return FaissRetriever(self, self._cache['faiss_flat_gpu'])
-    return FaissRetriever(self, self._cache['faiss_flat'], qbatch=qbatch)
+        return FaissRetriever(self, self._cache['faiss_flat_gpu'], drop_query_vec=drop_query_vec)
+    return FaissRetriever(self, self._cache['faiss_flat'], qbatch=qbatch, drop_query_vec=drop_query_vec)
 FlexIndex.faiss_flat_retriever = _faiss_flat_retriever
 
 
-def _faiss_hnsw_retriever(self, neighbours=32, ef_construction=40, ef_search=16, cache=True, search_bounded_queue=True, qbatch=64):
+def _faiss_hnsw_retriever(
+    self,
+    neighbours: int = 32,
+    *,
+    num_results: int = 1000,
+    ef_construction: int = 40,
+    ef_search: int = 16,
+    cache: bool = True,
+    search_bounded_queue: bool = True,
+    qbatch: int = 64,
+    drop_query_vec: bool = False,
+) -> pt.Transformer:
+    """Returns a retriever that uses FAISS over a HNSW index.
+
+    Creates the HNSW graph structure if it does not already exist. When ``cache=True`` (dfault), this graph structure is
+    cached to disk for subsequent use.
+
+    Args:
+        neighbours: The number of neighbours of the constructed neighborhood graph
+        num_results: The number of results to return per query
+        ef_construction: The number of neighbours to consider during construction
+        ef_search: The number of neighbours to consider during search
+        cache: Whether to cache the index to disk
+        search_bounded_queue: Whether to use a bounded queue during search
+        qbatch: The batch size during search
+        drop_query_vec: Whether to drop the query vector from the output
+
+    Returns:
+        :class:`~pyterrier.Transformer`: A retriever that uses FAISS over a HNSW index
+
+    .. note::
+        This transformer requires the ``faiss`` package to be installed.
+
+    .. cite.dblp:: journals/corr/abs-2401-08281
+    """
     pyterrier_dr.util.assert_faiss()
     import faiss
     meta, = self.payload(return_dvecs=False, return_docnos=False)
@@ -96,7 +154,7 @@ def _faiss_hnsw_retriever(self, neighbours=32, ef_construction=40, ef_search=16,
         dvecs, meta = self.payload(return_docnos=False)
         if not os.path.exists(self.index_path/index_name):
             idx = faiss.IndexHNSWFlat(meta['vec_size'], neighbours, faiss.METRIC_INNER_PRODUCT)
-            for start_idx in logger.pbar(range(0, dvecs.shape[0], 4096), desc='indexing', unit='batch'):
+            for start_idx in pt.tqdm(range(0, dvecs.shape[0], 4096), desc='indexing', unit='batch'):
                 idx.add(np.array(dvecs[start_idx:start_idx+4096]))
             idx.storage = faiss.IndexFlatIP(meta['vec_size']) # clear storage ; we can use faiss_flat here instead so we don't keep an extra copy
             if cache:
@@ -107,35 +165,52 @@ def _faiss_hnsw_retriever(self, neighbours=32, ef_construction=40, ef_search=16,
             with logger.duration('reading hnsw table'):
                 self._cache[key] = faiss.read_index(str(self.index_path/index_name))
         self._cache[key].storage = self.faiss_flat_retriever().faiss_index
-    return FaissRetriever(self, self._cache[key], ef_search=ef_search, search_bounded_queue=search_bounded_queue, qbatch=qbatch)
+    return FaissRetriever(self, self._cache[key], num_results=num_results, ef_search=ef_search, search_bounded_queue=search_bounded_queue, qbatch=qbatch, drop_query_vec=drop_query_vec)
 FlexIndex.faiss_hnsw_retriever = _faiss_hnsw_retriever
 
 
-def _faiss_hnsw_graph(self, neighbours=32, ef_construction=40):
+def _faiss_hnsw_graph(self, neighbours: int = 32, *, ef_construction: int = 40):
+    """Returns the (approximate) HNSW graph structure created by the HNSW index.
+
+    If the graph structure does not already exist, it is created and cached to disk.
+
+    Args:
+        neighbours: The number of neighbours of the constructed neighborhood graph
+        ef_construction: The number of neighbours to consider during construction
+
+    Returns:
+        :class:`pyterrier_adaptive.CorpusGraph`: The HNSW graph structure
+
+    .. note::
+        This function requires the ``faiss`` package to be installed.
+
+    .. cite.dblp:: journals/corr/abs-2401-08281
+    """
     key = ('faiss_hnsw', neighbours//2, ef_construction)
     graph_name = f'hnsw_n-{neighbours}_ef-{ef_construction}.graph'
     if key not in self._cache:
         if not (self.index_path/graph_name/'pt_meta.json').exists():
             retr = self.faiss_hnsw_retriever(neighbours=neighbours//2, ef_construction=ef_construction)
             _build_hnsw_graph(retr.faiss_index.hnsw, self.index_path/graph_name)
-        from pyterrier_adaptive import CorpusGraph
-        self._cache[key] = CorpusGraph.load(self.index_path/graph_name)
+        self._cache[key] = pta.Artifact.load(self.index_path/graph_name)
     return self._cache[key]
 FlexIndex.faiss_hnsw_graph = _faiss_hnsw_graph
 
 
 def _build_hnsw_graph(hnsw, out_dir):
+    import faiss
     lvl_0_size = hnsw.nb_neighbors(0)
     num_docs = hnsw.offsets.size() - 1
     scores = np.zeros(lvl_0_size, dtype=np.float16)
     out_dir.mkdir(parents=True, exist_ok=True)
     edges_path = out_dir/'edges.u32.np'
     weights_path = out_dir/'weights.f16.np'
+    neighbors = faiss.vector_to_array(hnsw.neighbors)
     with ir_datasets.util.finialized_file(str(edges_path), 'wb') as fe, \
          ir_datasets.util.finialized_file(str(weights_path), 'wb') as fw:
-        for did in logger.pbar(range(num_docs), unit='doc', smoothing=1):
+        for did in pt.tqdm(range(num_docs), unit='doc', smoothing=1):
             start = hnsw.offsets.at(did)
-            dids = [hnsw.neighbors.at(i) for i in range(start, start+lvl_0_size)]
+            dids = [neighbors[i] for i in range(start, start + lvl_0_size)]
             dids = [(d if d != -1 else did) for d in dids] # replace with self if missing value
             fe.write(np.array(dids, dtype=np.uint32).tobytes())
             fw.write(scores.tobytes())
@@ -144,6 +219,7 @@ def _build_hnsw_graph(hnsw, out_dir):
         json.dump({
             'type': 'corpus_graph',
             'format': 'np_topk',
+            'package_hint': 'pyterrier-adaptive',
             'doc_count': num_docs,
             'k': lvl_0_size,
         }, fout)
@@ -154,7 +230,35 @@ def _sample_train(index, count=None):
     idxs = np.random.RandomState(0).choice(dvecs.shape[0], size=count, replace=False)
     return dvecs[idxs]
 
-def _faiss_ivf_retriever(self, train_sample=None, n_list=None, cache=True, n_probe=1):
+def _faiss_ivf_retriever(self,
+    *,
+    num_results: int = 1000,
+    train_sample: Optional[int] = None,
+    n_list: Optional[int] = None,
+    cache: bool = True,
+    n_probe: int = 1,
+    drop_query_vec: bool = False
+):
+    """Returns a retriever that uses FAISS over an IVF index.
+
+    If the IVF structure does not already exist, it is created and cached to disk (when ``cache=True`` (default)).
+
+    Args:
+        num_results: The number of results to return per query
+        train_sample: The number of training samples to use for training the index. If not provided, a default value is used (approximately the square root of the number of documents).
+        n_list: The number of posting lists to use for the index. If not provided, a default value is used (approximately ``train_sample/39``).
+        cache: Whether to cache the index to disk.
+        n_probe: The number of posting lists to probe during search. The higher the value, the better the approximation will be, but the longer it will take.
+        drop_query_vec: Whether to drop the query vector from the output.
+
+    Returns:
+        :class:`~pyterrier.Transformer`: A retriever that uses FAISS over an IVF index
+
+    .. note::
+        This transformer requires the ``faiss`` package to be installed.
+
+    .. cite.dblp:: journals/corr/abs-2401-08281
+    """
     pyterrier_dr.util.assert_faiss()
     import faiss
     meta, = self.payload(return_dvecs=False, return_docnos=False)
@@ -186,7 +290,7 @@ def _faiss_ivf_retriever(self, train_sample=None, n_list=None, cache=True, n_pro
                 train = _sample_train(self, train_sample)
             with logger.duration(f'training ivf with {n_list} posting lists'):
                 idx.train(train)
-            for start_idx in logger.pbar(range(0, dvecs.shape[0], 4096), desc='indexing', unit='batch'):
+            for start_idx in pt.tqdm(range(0, dvecs.shape[0], 4096), desc='indexing', unit='batch'):
                 idx.add(np.array(dvecs[start_idx:start_idx+4096]))
             if cache:
                 with logger.duration('caching index'):
@@ -197,5 +301,5 @@ def _faiss_ivf_retriever(self, train_sample=None, n_list=None, cache=True, n_pro
         else:
             with logger.duration('reading index'):
                 self._cache[key] = faiss.read_index(str(self.index_path/index_name))
-    return FaissRetriever(self, self._cache[key], n_probe=n_probe)
+    return FaissRetriever(self, self._cache[key], num_results=num_results, n_probe=n_probe, drop_query_vec=drop_query_vec)
 FlexIndex.faiss_ivf_retriever = _faiss_ivf_retriever
