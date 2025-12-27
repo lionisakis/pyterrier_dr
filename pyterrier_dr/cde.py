@@ -35,7 +35,6 @@ class CDE(BiEncoder):
             texts,
             prompt_name="document",
             batch_size=batch_size or self.batch_size,
-            show_progress=show_progress,
         )
 
     def encode_queries(self, texts: List[str], batch_size=None):
@@ -50,7 +49,6 @@ class CDE(BiEncoder):
             texts,
             prompt_name='query',
             dataset_embeddings=self.cache.context(),
-            show_progress=show_progress,
         )
         # sentence transformers doesn't norm?
         result = result / np.linalg.norm(result, ord=2, axis=1, keepdims=True)
@@ -68,7 +66,6 @@ class CDE(BiEncoder):
             texts,
             prompt_name='document',
             dataset_embeddings=self.cache.context(),
-            show_progress=show_progress,
         )
         # sentence transformers doesn't norm?
         result = result / np.linalg.norm(result, ord=2, axis=1, keepdims=True)
