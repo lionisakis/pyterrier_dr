@@ -222,6 +222,11 @@ def _np_scorer(self, *, num_results: Optional[int] = None) -> pt.Transformer:
 
     Args:
         num_results: The number of results to return per query. If not provided, all resuls from the original fram are returned.
+        mask: Optional sequence of per-document weights.
+            If provided, scores for each document are multiplied by the corresponding
+            mask value. This can be used to filter or downweight documents during
+            retrieval.
+
 
     Returns:
         :class:`~pyterrier.Transformer`: A transformer that scores query vectors with numpy.
