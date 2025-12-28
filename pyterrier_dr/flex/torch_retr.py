@@ -199,7 +199,7 @@ def _torch_retriever(self,
     fp16: bool = False,
     qbatch: int = 64,
     drop_query_vec: bool = False
-    index_select: Optional[Sequence[int]] = None,
+    index_select: Optional[np.ndarray] = None,
 ):
     """Return a retriever that uses pytorch to perform brute-force retrieval results using the indexed vectors.
 
