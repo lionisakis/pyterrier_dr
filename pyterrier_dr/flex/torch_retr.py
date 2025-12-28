@@ -1,4 +1,4 @@
-from typing import Optional
+from typing import Optional, Sequence
 import numpy as np
 import torch
 import pyterrier_alpha as pta
@@ -199,6 +199,7 @@ def _torch_retriever(self,
     fp16: bool = False,
     qbatch: int = 64,
     drop_query_vec: bool = False
+    index_select: Optional[Sequence[int]] = None,
 ):
     """Return a retriever that uses pytorch to perform brute-force retrieval results using the indexed vectors.
 
@@ -214,10 +215,13 @@ def _torch_retriever(self,
         fp16: Whether to use half precision (fp16) for scoring.
         qbatch: The number of queries to score in each batch.
         drop_query_vec: Whether to drop the query vector from the output.
+        index_select: Optional list or array of document ids to restrict retrieval to.
+            If provided, retrieval is performed only over this subset of the index,
+            which is internally converted to a torch tensor on the target device.
 
     Returns:
         :class:`~pyterrier.Transformer`: A transformer that retrieves using pytorch.
     """
-    return TorchRetriever(self, self.torch_vecs(device=device, fp16=fp16), num_results=num_results, qbatch=qbatch, drop_query_vec=drop_query_vec)
+    return TorchRetriever(self, self.torch_vecs(device=device, fp16=fp16), num_results=num_results, qbatch=qbatch, drop_query_vec=drop_query_vec, index_select=index_select)
 
 FlexIndex.torch_retriever = _torch_retriever
