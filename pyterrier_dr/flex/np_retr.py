@@ -163,7 +163,7 @@ def _np_vecs(self) -> np.ndarray:
 FlexIndex.np_vecs = _np_vecs
 
 
-def _np_retriever(self, *, num_results: int = 1000, batch_size: Optional[int] = None, drop_query_vec: bool = False):
+def _np_retriever(self, *, num_results: int = 1000, batch_size: Optional[int] = None, drop_query_vec: bool = False, mask: Optional[np.ndarray] = None) -> pt.Transformer:
     """Return a retriever that uses numpy to perform a brute force search over the index.
 
     The returned transformer expects a DataFrame with columns ``qid`` and ``query_vec``. It outpus
@@ -177,7 +177,7 @@ def _np_retriever(self, *, num_results: int = 1000, batch_size: Optional[int] = 
     Returns:
         :class:`~pyterrier.Transformer`: A retriever that uses numpy to perform a brute force search.
     """
-    return NumpyRetriever(self, num_results=num_results, batch_size=batch_size, drop_query_vec=drop_query_vec)
+    return NumpyRetriever(self, num_results=num_results, batch_size=batch_size, drop_query_vec=drop_query_vec, mask=mask)
 
 FlexIndex.np_retriever = _np_retriever
 FlexIndex.retriever = _np_retriever # default retriever
