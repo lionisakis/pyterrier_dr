@@ -5,6 +5,7 @@ import pandas as pd
 from .. import SimFn
 from ..indexes import RankedLists
 from . import FlexIndex
+from .core import _validate_mask
 import pyterrier_alpha as pta
 
 class NumpyRetriever(pt.Transformer):
@@ -20,8 +21,7 @@ class NumpyRetriever(pt.Transformer):
         self.flex_index = flex_index
         self.num_results = num_results
         self.batch_size = batch_size or 4096
-        if mask is not None and not np.isin(mask, [0, 1]).all():
-            raise ValueError("mask must contain only 0 or 1 values")
+        _validate_mask(mask)
         self.mask = mask
         self.drop_query_vec = drop_query_vec
 

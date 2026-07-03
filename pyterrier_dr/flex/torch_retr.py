@@ -5,6 +5,7 @@ import pyterrier_alpha as pta
 import pyterrier as pt
 from .. import SimFn, infer_device
 from . import FlexIndex
+from .core import _validate_mask
 from .np_retr import NumpyScorer
 
 
@@ -42,7 +43,7 @@ class TorchRetriever(pt.Transformer):
         *,
         num_results: int = 1000,
         qbatch: int = 64,
-        index_select: Optional[np.ndarray] = None,
+        mask: Optional[np.ndarray] = None,
         drop_query_vec: bool = False,
     ):
         self.flex_index = flex_index
@@ -53,10 +54,13 @@ class TorchRetriever(pt.Transformer):
 
         self.docnos, _ = flex_index.payload(return_dvecs=False)
 
-        self.index_select = None
-        if index_select is not None:
-            self.index_select = torch.as_tensor(
-                index_select,
+        _validate_mask(mask)
+        self.mask = mask
+
+        self._index_select = None
+        if mask is not None:
+            self._index_select = torch.as_tensor(
+                np.flatnonzero(mask),
                 dtype=torch.long,
                 device=torch_vecs.device
             )
@@ -68,7 +72,7 @@ class TorchRetriever(pt.Transformer):
                 self.torch_vecs,
                 num_results=k,
                 qbatch=self.qbatch,
-                index_select=self.index_select,
+                mask=self.mask,
                 drop_query_vec=self.drop_query_vec,
             )
 
@@ -80,10 +84,10 @@ class TorchRetriever(pt.Transformer):
             np.stack(inp['query_vec'])
         ).to(self.torch_vecs)
 
-        # Transposed document vectors (filtered to index_select subset if provided)
+        # Transposed document vectors (filtered to the mask subset if provided)
         tv = (
-            self.torch_vecs[self.index_select].T
-            if self.index_select is not None
+            self.torch_vecs[self._index_select].T
+            if self._index_select is not None
             else self.torch_vecs.T
         )
 
@@ -110,8 +114,8 @@ class TorchRetriever(pt.Transformer):
             scores = scores.cpu().numpy()
             docids = docids.cpu().numpy()
 
-            if self.index_select is not None:
-                docids = self.index_select.cpu().numpy()[docids]
+            if self._index_select is not None:
+                docids = self._index_select.cpu().numpy()[docids]
 
             for s, d in zip(scores, docids):
                 result.extend({
@@ -184,7 +188,7 @@ def _torch_retriever(self,
     fp16: bool = False,
     qbatch: int = 64,
     drop_query_vec: bool = False,
-    index_select: Optional[np.ndarray] = None,
+    mask: Optional[np.ndarray] = None,
 ):
     """Return a retriever that uses pytorch to perform brute-force retrieval results using the indexed vectors.
 
@@ -200,13 +204,14 @@ def _torch_retriever(self,
         fp16: Whether to use half precision (fp16) for scoring.
         qbatch: The number of queries to score in each batch.
         drop_query_vec: Whether to drop the query vector from the output.
-        index_select: Optional list or array of document ids to restrict retrieval to.
-            If provided, retrieval is performed only over this subset of the index,
-            which is internally converted to a torch tensor on the target device.
+        mask: Optional binary array (0 or 1) of length equal to the number of documents.
+            Documents with mask value 0 are excluded from retrieval entirely (internally
+            converted to a document id subset for an in-memory gather, rather than
+            zeroing scores as :meth:`np_retriever` does).
 
     Returns:
         :class:`~pyterrier.Transformer`: A transformer that retrieves using pytorch.
     """
-    return TorchRetriever(self, self.torch_vecs(device=device, fp16=fp16), num_results=num_results, qbatch=qbatch, drop_query_vec=drop_query_vec, index_select=index_select)
+    return TorchRetriever(self, self.torch_vecs(device=device, fp16=fp16), num_results=num_results, qbatch=qbatch, drop_query_vec=drop_query_vec, mask=mask)
 
 FlexIndex.torch_retriever = _torch_retriever
