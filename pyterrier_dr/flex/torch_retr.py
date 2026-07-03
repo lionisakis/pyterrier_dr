@@ -75,7 +75,12 @@ class TorchRetriever(pt.Transformer):
     def transform(self, inp):
         pta.validate.query_frame(inp, extra_columns=['query_vec'])
         inp = inp.reset_index(drop=True)
-
+        result = pta.DataFrameBuilder(['docno', 'docid', 'score', 'rank'])
+        if inp.empty:
+            if self.drop_query_vec:
+                inp = inp.drop(columns='query_vec')
+            return result.to_df(inp)
+        
         query_vecs = torch.from_numpy(
             np.stack(inp['query_vec'])
         ).to(self.torch_vecs)
@@ -86,8 +91,6 @@ class TorchRetriever(pt.Transformer):
             if self.index_select is not None
             else self.torch_vecs.T
         )
-
-        result = pta.DataFrameBuilder(['docno', 'docid', 'score', 'rank'])
 
         it = range(0, query_vecs.shape[0], self.qbatch)
         if self.flex_index.verbose:
@@ -125,6 +128,29 @@ class TorchRetriever(pt.Transformer):
             inp = inp.drop(columns='query_vec')
 
         return result.to_df(inp)
+
+    def __eq__(self, other):
+        if not isinstance(other, TorchRetriever):
+            return NotImplemented
+        return (
+            self.flex_index.index_path == other.flex_index.index_path and
+            self.num_results == other.num_results and
+            self.qbatch == other.qbatch and
+            self.drop_query_vec == other.drop_query_vec and
+            str(self.torch_vecs.device) == str(other.torch_vecs.device) and
+            str(self.torch_vecs.dtype) == str(other.torch_vecs.dtype)
+        )
+
+    def __hash__(self):
+        return hash((
+            TorchRetriever,
+            self.flex_index.index_path,
+            self.num_results,
+            self.qbatch,
+            self.drop_query_vec,
+            str(self.torch_vecs.device),
+            str(self.torch_vecs.dtype),
+        ))
 
 
 

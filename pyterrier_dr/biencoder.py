@@ -6,6 +6,19 @@ import pandas as pd
 import pyterrier_alpha as pta
 import pyterrier_dr
 from . import SimFn
+import torch
+
+
+def _model_eq_key(model):
+    return (
+        model.__class__,
+        getattr(model, 'model_name', None),
+        getattr(model, 'batch_size', None),
+        getattr(model, 'text_field', None),
+        getattr(model, 'verbose', None),
+        getattr(model, 'max_length', None),
+        getattr(model, 'device', None),
+    )
 
 
 class BiEncoder(pt.Transformer):
@@ -84,12 +97,30 @@ class BiEncoder(pt.Transformer):
         if hasattr(self, 'config') and hasattr(self.config, 'sim_fn'):
             return SimFn(self.config.sim_fn)
         return SimFn.dot # default
-
+    
     @abstractmethod
-    def encode_queries(self, texts: List[str], batch_size: Optional[int] = None) -> np.array:
+    def encode_queries_torch(self, texts: List[str], batch_size: Optional[int] = None) -> 'torch.Tensor':
         """Abstract method to encode a list of query texts into dense vectors.
 
+        This function is used by the transformer returned by :meth:`encode_queries`.
+        It can be used for training, so should not detach gradients. :meth:`encode_queries` 
+        applies ``torch.no_grad()``.
+
+        Args:
+            texts: A list of query texts
+            batch_size: The batch size to use for encoding
+
+        Returns:
+            torch.Tensor: A tensor of shape (n_queries, n_dims)
+        """
+
+
+    def encode_queries(self, texts: List[str], batch_size: Optional[int] = None) -> np.array:
+        """Default method to encode a list of query texts into dense vectors and return as numpy array.
+
         This function is used by the transformer returned by :meth:`query_encoder`.
+
+        The default implementation of this method called :meth:`encode_queries_torch`.
 
         Args:
             texts: A list of query texts
@@ -98,7 +129,8 @@ class BiEncoder(pt.Transformer):
         Returns:
             np.array: A numpy array of shape (n_queries, n_dims)
         """
-        raise NotImplementedError()
+        with torch.no_grad():
+            return self.encode_queries_torch(texts, batch_size=batch_size).cpu().numpy()
 
     @abstractmethod
     def encode_docs(self, texts: List[str], batch_size: Optional[int] = None) -> np.array:
@@ -142,6 +174,18 @@ class BiQueryEncoder(pt.Transformer):
 
     def __repr__(self):
         return f'{repr(self.bi_encoder_model)}.query_encoder()'
+    
+    def __eq__(self, other):
+        if not isinstance(other, BiQueryEncoder):
+            return NotImplemented
+        return (
+            _model_eq_key(self.bi_encoder_model) == _model_eq_key(other.bi_encoder_model) and
+            self.verbose == other.verbose and
+            self.batch_size == other.batch_size
+        )
+
+    def __hash__(self):
+        return hash((BiQueryEncoder, _model_eq_key(self.bi_encoder_model), self.verbose, self.batch_size))
 
     def subtransformers(self):
         return {} # don't treat self.bi_encoder_model as a subtransformer.
@@ -171,6 +215,19 @@ class BiDocEncoder(pt.Transformer):
 
     def __repr__(self):
         return f'{repr(self.bi_encoder_model)}.doc_encoder()'
+    
+    def __eq__(self, other):
+        if not isinstance(other, BiDocEncoder):
+            return NotImplemented
+        return (
+            _model_eq_key(self.bi_encoder_model) == _model_eq_key(other.bi_encoder_model) and
+            self.verbose == other.verbose and
+            self.batch_size == other.batch_size and
+            self.text_field == other.text_field
+        )
+
+    def __hash__(self):
+        return hash((BiDocEncoder, _model_eq_key(self.bi_encoder_model), self.verbose, self.batch_size, self.text_field))
 
     def subtransformers(self):
         return {} # don't treat self.bi_encoder_model as a subtransformer.
