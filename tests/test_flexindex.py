@@ -291,17 +291,18 @@ class TestFlexIndex(unittest.TestCase):
             res = retr(pd.DataFrame(columns=['qid', 'query_vec']))
             self.assertEqual(len(res), 0)
 
-    # --- Group B: index_select tests for TorchRetriever ---
+    # --- Group B: mask tests for TorchRetriever ---
 
     # Only selected document IDs should appear in results
-    def test_torch_retriever_index_select_subset(self):
+    def test_torch_retriever_mask_subset(self):
         with tempfile.TemporaryDirectory() as destdir:
             index = FlexIndex(destdir+'/index')
             dataset = self._generate_data(count=200, dim=50)
             index.index(dataset)
 
-            index_select = np.array([0, 1, 2, 3, 4], dtype=np.int64)
-            retr = index.torch_retriever(num_results=100, index_select=index_select)
+            mask = np.zeros(200, dtype=np.float32)
+            mask[[0, 1, 2, 3, 4]] = 1
+            retr = index.torch_retriever(num_results=100, mask=mask)
             res = retr(pd.DataFrame([
                 {'qid': '0', 'query_vec': dataset[0]['doc_vec']},
             ]))
@@ -311,14 +312,15 @@ class TestFlexIndex(unittest.TestCase):
             self.assertEqual(res_q0[res_q0['rank'] == 0].iloc[0]['docno'], '0')
 
     # Excluding the best-matching doc should remove it from results
-    def test_torch_retriever_index_select_exclude_match(self):
+    def test_torch_retriever_mask_exclude_match(self):
         with tempfile.TemporaryDirectory() as destdir:
             index = FlexIndex(destdir+'/index')
             dataset = self._generate_data(count=200, dim=50)
             index.index(dataset)
 
-            index_select = np.array([2, 3, 4, 5, 6], dtype=np.int64)
-            retr = index.torch_retriever(num_results=100, index_select=index_select)
+            mask = np.zeros(200, dtype=np.float32)
+            mask[2:7] = 1
+            retr = index.torch_retriever(num_results=100, mask=mask)
             res = retr(pd.DataFrame([
                 {'qid': '0', 'query_vec': dataset[0]['doc_vec']},
             ]))
@@ -327,20 +329,20 @@ class TestFlexIndex(unittest.TestCase):
             self.assertTrue(set(res_q0['docno'].values).issubset({'2', '3', '4', '5', '6'}))
             self.assertEqual(len(res_q0), 5)
 
-    # Selecting all docs should produce identical results to no index_select
-    def test_torch_retriever_index_select_all(self):
+    # Selecting all docs should produce identical results to no mask
+    def test_torch_retriever_mask_all_ones(self):
         with tempfile.TemporaryDirectory() as destdir:
             index = FlexIndex(destdir+'/index')
             dataset = self._generate_data(count=200, dim=50)
             index.index(dataset)
 
-            index_select = np.arange(200, dtype=np.int64)
+            mask = np.ones(200, dtype=np.float32)
             inp = pd.DataFrame([
                 {'qid': '0', 'query_vec': dataset[0]['doc_vec']},
                 {'qid': '1', 'query_vec': dataset[1]['doc_vec']},
             ])
             res_plain = index.torch_retriever(num_results=100)(inp)
-            res_sel = index.torch_retriever(num_results=100, index_select=index_select)(inp)
+            res_sel = index.torch_retriever(num_results=100, mask=mask)(inp)
 
             self.assertEqual(len(res_plain), len(res_sel))
             for qid, expected_docno in [('0', '0'), ('1', '1')]:
@@ -351,14 +353,15 @@ class TestFlexIndex(unittest.TestCase):
                 np.testing.assert_almost_equal(r0_sel['score'], r0_plain['score'], decimal=5)
 
     # When fewer docs are selected than num_results, return all selected docs
-    def test_torch_retriever_index_select_fewer_than_num_results(self):
+    def test_torch_retriever_mask_fewer_than_num_results(self):
         with tempfile.TemporaryDirectory() as destdir:
             index = FlexIndex(destdir+'/index')
             dataset = self._generate_data(count=200, dim=50)
             index.index(dataset)
 
-            index_select = np.array([10, 20, 30], dtype=np.int64)
-            retr = index.torch_retriever(num_results=100, index_select=index_select)
+            mask = np.zeros(200, dtype=np.float32)
+            mask[[10, 20, 30]] = 1
+            retr = index.torch_retriever(num_results=100, mask=mask)
             res = retr(pd.DataFrame([
                 {'qid': '0', 'query_vec': dataset[10]['doc_vec']},
             ]))
@@ -367,22 +370,21 @@ class TestFlexIndex(unittest.TestCase):
             self.assertTrue(set(res_q0['docno'].values).issubset({'10', '20', '30'}))
             self.assertEqual(res_q0[res_q0['rank'] == 0].iloc[0]['docno'], '10')
 
-    # fuse_rank_cutoff should propagate index_select to the new retriever
-    def test_torch_retriever_index_select_fuse_rank_cutoff(self):
-        import torch
+    # fuse_rank_cutoff should propagate the mask to the new retriever
+    def test_torch_retriever_mask_fuse_rank_cutoff(self):
         with tempfile.TemporaryDirectory() as destdir:
             index = FlexIndex(destdir+'/index')
             dataset = self._generate_data(count=200, dim=50)
             index.index(dataset)
 
-            index_select = np.array([0, 1, 2, 3, 4], dtype=np.int64)
-            retr = index.torch_retriever(num_results=100, index_select=index_select)
+            mask = np.zeros(200, dtype=np.float32)
+            mask[[0, 1, 2, 3, 4]] = 1
+            retr = index.torch_retriever(num_results=100, mask=mask)
             fused = retr.fuse_rank_cutoff(3)
 
             self.assertIsNotNone(fused)
             self.assertEqual(fused.num_results, 3)
-            self.assertIsNotNone(fused.index_select)
-            self.assertTrue(torch.equal(fused.index_select, retr.index_select))
+            self.assertIs(fused.mask, retr.mask)
 
             res = fused(pd.DataFrame([
                 {'qid': '0', 'query_vec': dataset[0]['doc_vec']},
@@ -393,14 +395,15 @@ class TestFlexIndex(unittest.TestCase):
             self.assertEqual(res_q0[res_q0['rank'] == 0].iloc[0]['docno'], '0')
 
     # Returned docnos and docids should map to original index positions, not subset positions
-    def test_torch_retriever_index_select_docno_mapping(self):
+    def test_torch_retriever_mask_docno_mapping(self):
         with tempfile.TemporaryDirectory() as destdir:
             index = FlexIndex(destdir+'/index')
             dataset = self._generate_data(count=200, dim=50)
             index.index(dataset)
 
-            index_select = np.array([50, 100, 150], dtype=np.int64)
-            retr = index.torch_retriever(num_results=10, index_select=index_select)
+            mask = np.zeros(200, dtype=np.float32)
+            mask[[50, 100, 150]] = 1
+            retr = index.torch_retriever(num_results=10, mask=mask)
             res = retr(pd.DataFrame([
                 {'qid': '0', 'query_vec': dataset[50]['doc_vec']},
             ]))
@@ -410,14 +413,15 @@ class TestFlexIndex(unittest.TestCase):
             self.assertEqual(res_q0[res_q0['rank'] == 0].iloc[0]['docno'], '50')
 
     # Selecting a single document should return exactly one result
-    def test_torch_retriever_index_select_single_doc(self):
+    def test_torch_retriever_mask_single_doc(self):
         with tempfile.TemporaryDirectory() as destdir:
             index = FlexIndex(destdir+'/index')
             dataset = self._generate_data(count=200, dim=50)
             index.index(dataset)
 
-            index_select = np.array([42], dtype=np.int64)
-            retr = index.torch_retriever(num_results=100, index_select=index_select)
+            mask = np.zeros(200, dtype=np.float32)
+            mask[42] = 1
+            retr = index.torch_retriever(num_results=100, mask=mask)
             res = retr(pd.DataFrame([
                 {'qid': '0', 'query_vec': dataset[42]['doc_vec']},
             ]))
@@ -425,6 +429,18 @@ class TestFlexIndex(unittest.TestCase):
             self.assertEqual(len(res_q0), 1)
             self.assertEqual(res_q0.iloc[0]['docno'], '42')
             self.assertEqual(res_q0.iloc[0]['docid'], 42)
+
+    # Non-binary mask values should raise ValueError
+    def test_torch_retriever_mask_rejects_non_binary(self):
+        with tempfile.TemporaryDirectory() as destdir:
+            index = FlexIndex(destdir+'/index')
+            dataset = self._generate_data(count=200, dim=50)
+            index.index(dataset)
+
+            mask = np.ones(200, dtype=np.float32)
+            mask[0] = 0.5
+            with self.assertRaises(ValueError):
+                index.torch_retriever(num_results=100, mask=mask)
 
     @unittest.skipIf(not pyterrier_dr.util.voyager_available(), "voyager not available")
     def test_voyager_retriever(self):
